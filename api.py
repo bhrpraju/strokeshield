@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import List, Optional, Dict
 import joblib
 import pandas as pd
@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="StrokeShield AI - Proactive Prevention API v2.0")
 
-# Allow Lovable to call this API
+# Allow all origins for now
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,6 +48,34 @@ class CoreHealthData(BaseModel):
     weight_kg: float
     smoking_status: str
     cigarettes_per_day: Optional[int] = 0
+    
+    @validator('Residence_type', pre=True, always=True)
+    def normalize_residence(cls, v):
+        if v is None:
+            return "Urban"
+        return str(v).title()
+    
+    @validator('gender', pre=True, always=True)
+    def normalize_gender(cls, v):
+        return str(v).title()
+    
+    @validator('ever_married', pre=True, always=True)
+    def normalize_married(cls, v):
+        v_str = str(v).lower()
+        if v_str in ['yes', 'married', 'widowed', 'divorced']:
+            return "Yes"
+        return "No"
+    
+    @validator('smoking_status', pre=True, always=True)
+    def normalize_smoking(cls, v):
+        v_str = str(v).lower()
+        if v_str in ['never smoked', 'never']:
+            return "never smoked"
+        elif v_str in ['formerly smoked', 'former', 'formerly']:
+            return "formerly smoked"
+        elif v_str in ['smokes', 'currently smoking', 'current', 'smoking']:
+            return "smokes"
+        return "Unknown"
 
 class RiskModifiers(BaseModel):
     """Tier 2: Evidence-based risk modifiers"""
@@ -97,6 +125,7 @@ class FullAssessmentRequest(BaseModel):
     core: CoreHealthData
     modifiers: Optional[RiskModifiers] = None
     labs: Optional[LabValues] = None
+
 # ============================================
 # CORE PREDICTION FUNCTION (ML Layer)
 # ============================================
@@ -164,7 +193,7 @@ def get_ml_risk_score(core_data):
     return score, cat, top_drivers, bmi, glucose
 
 # ============================================
-# RISK MODIFIER ENGINE (Evidence-Based Layer)
+# RISK MODIFIER ENGINE
 # ============================================
 def calculate_risk_modifiers(modifiers):
     """Calculate evidence-based risk modifiers with citations."""
@@ -265,7 +294,7 @@ def calculate_risk_modifiers(modifiers):
         })
         total_points += 5
     
-    # Sleep Apnea Screening (STOP-BANG simplified)
+    # Sleep Apnea Screening
     apnea_score = 0
     if modifiers.loud_snoring: apnea_score += 1
     if modifiers.witnessed_apneas: apnea_score += 2
@@ -454,6 +483,7 @@ def calculate_risk_modifiers(modifiers):
         total_points += 5
     
     return modifier_list, min(total_points, 30)
+
 # ============================================
 # LAB INTERPRETATION ENGINE
 # ============================================
@@ -470,261 +500,181 @@ def interpret_labs(labs, age=50):
     # HbA1c
     if labs.hba1c is not None:
         if labs.hba1c < 5.5:
-            status = "optimal"
-            action = "Maintain current habits."
+            status = "optimal"; action = "Maintain current habits."
         elif labs.hba1c < 6.0:
-            status = "good"
-            action = "Monitor annually."
+            status = "good"; action = "Monitor annually."
         elif labs.hba1c < 6.5:
-            status = "borderline"
-            action = "Lifestyle intervention. Recheck in 3 months."
+            status = "borderline"; action = "Lifestyle intervention. Recheck in 3 months."
         elif labs.hba1c < 7.0:
-            status = "high"
-            action = "Doctor consultation. Medication review."
+            status = "high"; action = "Doctor consultation. Medication review."
             doctor_triggers.append("HbA1c diabetic range")
         else:
-            status = "critical"
-            action = "URGENT: See doctor within 1 week. Poor glycemic control."
+            status = "critical"; action = "URGENT: See doctor within 1 week. Poor glycemic control."
             doctor_triggers.append("HbA1c critically high")
         
         interpretations.append({
-            "test": "HbA1c",
-            "value": f"{labs.hba1c}%",
-            "status": status,
-            "target": "<6.5% for stroke prevention",
-            "action": action,
+            "test": "HbA1c", "value": f"{labs.hba1c}%", "status": status,
+            "target": "<6.5% for stroke prevention", "action": action,
             "evidence": "HbA1c >=6.1% predicts >2x stroke recurrence (Wu et al., 2013)"
         })
-        
-        if status in ["high", "critical"]:
-            abnormal_flags.append("HbA1c")
+        if status in ["high", "critical"]: abnormal_flags.append("HbA1c")
     
     # Fasting Glucose
     if labs.fasting_glucose is not None:
         if labs.fasting_glucose < 100:
-            status = "optimal"
-            action = "Maintain."
+            status = "optimal"; action = "Maintain."
         elif labs.fasting_glucose < 126:
-            status = "borderline"
-            action = "Pre-diabetic. Lifestyle changes. Recheck in 3 months."
+            status = "borderline"; action = "Pre-diabetic. Lifestyle changes. Recheck in 3 months."
         elif labs.fasting_glucose < 160:
-            status = "high"
-            action = "Diabetic range. Doctor consultation."
+            status = "high"; action = "Diabetic range. Doctor consultation."
             doctor_triggers.append("Fasting glucose high")
         else:
-            status = "critical"
-            action = "URGENT: See doctor within 1 week."
+            status = "critical"; action = "URGENT: See doctor within 1 week."
             doctor_triggers.append("Fasting glucose critically high")
         
         interpretations.append({
-            "test": "Fasting Glucose",
-            "value": f"{labs.fasting_glucose} mg/dL",
-            "status": status,
-            "target": "<100 mg/dL",
-            "action": action,
+            "test": "Fasting Glucose", "value": f"{labs.fasting_glucose} mg/dL", "status": status,
+            "target": "<100 mg/dL", "action": action,
             "evidence": "Fasting glucose >126 = diabetic threshold (ADA guidelines)"
         })
-        
-        if status in ["high", "critical"]:
-            abnormal_flags.append("Fasting Glucose")
+        if status in ["high", "critical"]: abnormal_flags.append("Fasting Glucose")
     
     # LDL-C
     if labs.ldl is not None:
         if labs.ldl < 70:
-            status = "optimal"
-            action = "Excellent for high-risk patients."
+            status = "optimal"; action = "Excellent for high-risk patients."
         elif labs.ldl < 100:
-            status = "good"
-            action = "Acceptable. Monitor."
+            status = "good"; action = "Acceptable. Monitor."
         elif labs.ldl < 130:
-            status = "borderline"
-            action = "Diet changes. Consider statin if other risks."
+            status = "borderline"; action = "Diet changes. Consider statin if other risks."
         else:
-            status = "high"
-            action = "Doctor consultation. Statin therapy likely needed."
+            status = "high"; action = "Doctor consultation. Statin therapy likely needed."
             doctor_triggers.append("LDL-C high")
         
         interpretations.append({
-            "test": "LDL Cholesterol",
-            "value": f"{labs.ldl} mg/dL",
-            "status": status,
-            "target": "<100 mg/dL (<70 for high-risk)",
-            "action": action,
+            "test": "LDL Cholesterol", "value": f"{labs.ldl} mg/dL", "status": status,
+            "target": "<100 mg/dL (<70 for high-risk)", "action": action,
             "evidence": "LDL-C >130 = high risk. Each 39 mg/dL reduction = 22% stroke reduction (CTT meta-analysis)"
         })
-        
-        if status == "high":
-            abnormal_flags.append("LDL-C")
+        if status == "high": abnormal_flags.append("LDL-C")
     
     # ApoB
     if labs.apob is not None:
         if labs.apob < 60:
-            status = "optimal"
-            action = "Excellent."
+            status = "optimal"; action = "Excellent."
         elif labs.apob < 80:
-            status = "good"
-            action = "Acceptable."
+            status = "good"; action = "Acceptable."
         elif labs.apob < 100:
-            status = "borderline"
-            action = "Monitor. Consider lifestyle intensification."
+            status = "borderline"; action = "Monitor. Consider lifestyle intensification."
         else:
-            status = "high"
-            action = "Doctor consultation. Aggressive lipid lowering."
+            status = "high"; action = "Doctor consultation. Aggressive lipid lowering."
             doctor_triggers.append("ApoB high")
         
         interpretations.append({
-            "test": "ApoB",
-            "value": f"{labs.apob} mg/dL",
-            "status": status,
-            "target": "<60 mg/dL (optimal for high-risk)",
-            "action": action,
+            "test": "ApoB", "value": f"{labs.apob} mg/dL", "status": status,
+            "target": "<60 mg/dL (optimal for high-risk)", "action": action,
             "evidence": "ApoB is better predictor than LDL-C. Each particle = potential plaque (Attia, Outlive)"
         })
-        
-        if status == "high":
-            abnormal_flags.append("ApoB")
+        if status == "high": abnormal_flags.append("ApoB")
     
     # hs-CRP
     if labs.crp is not None:
         if labs.crp < 1.0:
-            status = "optimal"
-            action = "Low inflammation. Maintain."
+            status = "optimal"; action = "Low inflammation. Maintain."
         elif labs.crp < 3.0:
-            status = "average"
-            action = "Moderate. Anti-inflammatory diet."
+            status = "average"; action = "Moderate. Anti-inflammatory diet."
         elif labs.crp < 10.0:
-            status = "high"
-            action = "High inflammation. Doctor consultation."
+            status = "high"; action = "High inflammation. Doctor consultation."
             doctor_triggers.append("hs-CRP elevated")
         else:
-            status = "critical"
-            action = "URGENT: Rule out infection. See doctor."
+            status = "critical"; action = "URGENT: Rule out infection. See doctor."
             doctor_triggers.append("hs-CRP critically high")
         
         interpretations.append({
-            "test": "hs-CRP",
-            "value": f"{labs.crp} mg/L",
-            "status": status,
-            "target": "<1.0 mg/L (low risk)",
-            "action": action,
+            "test": "hs-CRP", "value": f"{labs.crp} mg/L", "status": status,
+            "target": "<1.0 mg/L (low risk)", "action": action,
             "evidence": "Independent stroke predictor. Even with normal cholesterol. (Ridker et al.)"
         })
-        
-        if status in ["high", "critical"]:
-            abnormal_flags.append("hs-CRP")
+        if status in ["high", "critical"]: abnormal_flags.append("hs-CRP")
     
     # Homocysteine
     if labs.homocysteine is not None:
         if labs.homocysteine < 10:
-            status = "optimal"
-            action = "Excellent."
+            status = "optimal"; action = "Excellent."
         elif labs.homocysteine < 12:
-            status = "borderline"
-            action = "B-vitamin supplementation."
+            status = "borderline"; action = "B-vitamin supplementation."
         else:
-            status = "high"
-            action = "Doctor consultation. MTHFR testing. Methylated B-complex."
+            status = "high"; action = "Doctor consultation. MTHFR testing. Methylated B-complex."
             doctor_triggers.append("Homocysteine elevated")
         
         interpretations.append({
-            "test": "Homocysteine",
-            "value": f"{labs.homocysteine} umol/L",
-            "status": status,
-            "target": "<10 umol/L (optimal)",
-            "action": action,
+            "test": "Homocysteine", "value": f"{labs.homocysteine} umol/L", "status": status,
+            "target": "<10 umol/L (optimal)", "action": action,
             "evidence": "40% of stroke patients have >12. MTHFR variant common in Indians. Fixable with B-vitamins."
         })
-        
-        if status == "high":
-            abnormal_flags.append("Homocysteine")
+        if status == "high": abnormal_flags.append("Homocysteine")
     
     # HOMA-IR
     if labs.fasting_insulin is not None and labs.fasting_glucose is not None:
         homa_ir = (labs.fasting_glucose * labs.fasting_insulin) / 405
         
         if homa_ir < 2.0:
-            status = "optimal"
-            action = "Excellent insulin sensitivity."
+            status = "optimal"; action = "Excellent insulin sensitivity."
         elif homa_ir < 2.5:
-            status = "acceptable"
-            action = "Monitor. Lifestyle changes."
+            status = "acceptable"; action = "Monitor. Lifestyle changes."
         elif homa_ir < 3.5:
-            status = "high"
-            action = "Insulin resistant. Doctor consultation. Metformin discussion."
+            status = "high"; action = "Insulin resistant. Doctor consultation. Metformin discussion."
             doctor_triggers.append("HOMA-IR elevated")
         else:
-            status = "critical"
-            action = "URGENT: Severe insulin resistance. Endocrinology referral."
+            status = "critical"; action = "URGENT: Severe insulin resistance. Endocrinology referral."
             doctor_triggers.append("HOMA-IR critically high")
         
         interpretations.append({
-            "test": "HOMA-IR (Insulin Resistance)",
-            "value": f"{homa_ir:.2f}",
-            "status": status,
-            "target": "<2.0 (ideal), <2.5 (acceptable)",
-            "action": action,
+            "test": "HOMA-IR (Insulin Resistance)", "value": f"{homa_ir:.2f}", "status": status,
+            "target": "<2.0 (ideal), <2.5 (acceptable)", "action": action,
             "evidence": "Insulin resistance precedes diabetes by 10-15 years. Catches risk before HbA1c rises. (Attia, Outlive)"
         })
-        
-        if status in ["high", "critical"]:
-            abnormal_flags.append("HOMA-IR")
+        if status in ["high", "critical"]: abnormal_flags.append("HOMA-IR")
     
     # NT-proBNP
     if labs.nt_probnp is not None:
         threshold = 450 if age > 75 else 125
         
         if labs.nt_probnp < threshold:
-            status = "optimal"
-            action = "No heart strain detected."
+            status = "optimal"; action = "No heart strain detected."
         elif labs.nt_probnp < threshold * 2:
-            status = "elevated"
-            action = "Mild heart strain. Cardiology follow-up."
+            status = "elevated"; action = "Mild heart strain. Cardiology follow-up."
             doctor_triggers.append("NT-proBNP elevated")
         else:
-            status = "high"
-            action = "URGENT: Significant heart strain. Cardiology referral."
+            status = "high"; action = "URGENT: Significant heart strain. Cardiology referral."
             doctor_triggers.append("NT-proBNP high")
         
         interpretations.append({
-            "test": "NT-proBNP",
-            "value": f"{labs.nt_probnp} pg/mL",
-            "status": status,
-            "target": f"<{threshold} pg/mL (age-adjusted)",
-            "action": action,
+            "test": "NT-proBNP", "value": f"{labs.nt_probnp} pg/mL", "status": status,
+            "target": f"<{threshold} pg/mL (age-adjusted)", "action": action,
             "evidence": "Detects early heart strain before symptoms. Predicts AFib (1 in 4 strokes). (ESC guidelines)"
         })
-        
-        if status in ["elevated", "high"]:
-            abnormal_flags.append("NT-proBNP")
+        if status in ["elevated", "high"]: abnormal_flags.append("NT-proBNP")
     
     # Sleep Apnea (AHI)
     if labs.ahi is not None:
         if labs.ahi < 5:
-            status = "optimal"
-            action = "No sleep apnea."
+            status = "optimal"; action = "No sleep apnea."
         elif labs.ahi < 15:
-            status = "mild"
-            action = "Mild OSA. Lifestyle changes, positional therapy."
+            status = "mild"; action = "Mild OSA. Lifestyle changes, positional therapy."
         elif labs.ahi < 30:
-            status = "moderate"
-            action = "Moderate OSA. CPAP consultation."
+            status = "moderate"; action = "Moderate OSA. CPAP consultation."
             doctor_triggers.append("Moderate OSA")
         else:
-            status = "severe"
-            action = "URGENT: Severe OSA. CPAP treatment essential."
+            status = "severe"; action = "URGENT: Severe OSA. CPAP treatment essential."
             doctor_triggers.append("Severe OSA")
         
         interpretations.append({
-            "test": "Sleep Apnea (AHI)",
-            "value": f"{labs.ahi} events/hour",
-            "status": status,
-            "target": "<5 events/hour",
-            "action": action,
+            "test": "Sleep Apnea (AHI)", "value": f"{labs.ahi} events/hour", "status": status,
+            "target": "<5 events/hour", "action": action,
             "evidence": "Untreated OSA = 2-3x stroke risk. 60-70% of stroke patients have OSA. CPAP reduces recurrence."
         })
-        
-        if status in ["moderate", "severe"]:
-            abnormal_flags.append("Sleep Apnea")
+        if status in ["moderate", "severe"]: abnormal_flags.append("Sleep Apnea")
     
     return interpretations, abnormal_flags, doctor_triggers
 
@@ -871,6 +821,7 @@ def get_lab_suggestions(ml_score, adjusted_score, category, top_drivers, core_da
     labs.sort(key=lambda x: priority_order[x["priority"]])
     
     return labs
+
 # ============================================
 # PREVENTION PLAN GENERATOR
 # ============================================
@@ -1119,15 +1070,77 @@ def generate_doctor_report(ml_score, adjusted_score, category, top_drivers, core
 # ============================================
 # API ENDPOINTS
 # ============================================
+
 @app.post("/assess")
-def full_assessment(request: FullAssessmentRequest):
+def full_assessment(request: dict):
     """Complete assessment: ML score + modifiers + labs + plan + report."""
     
+    # Normalize field names from frontend variations
+    core = request.get("core", {})
+    
+    # Handle case variations and common misspellings
+    field_mapping = {
+        "residence_type": "Residence_type",
+        "residence_Type": "Residence_type",
+        "Residence_Type": "Residence_type",
+        "avgGlucoseLevel": "avg_glucose_level",
+        "avg_glucose": "avg_glucose_level",
+        "glucose": "avg_glucose_level",
+        "heightCm": "height_cm",
+        "height": "height_cm",
+        "weightKg": "weight_kg",
+        "weight": "weight_kg",
+        "cigarettesPerDay": "cigarettes_per_day",
+        "cigarettes_per_day": "cigarettes_per_day",
+        "glucose_known": "glucose_known",
+        "glucoseKnown": "glucose_known",
+    }
+    
+    for old, new in field_mapping.items():
+        if old in core and new not in core:
+            core[new] = core.pop(old)
+    
+    # Ensure required fields have defaults if missing
+    if "glucose_known" not in core:
+        core["glucose_known"] = core.get("avg_glucose_level") is not None
+    
+    if "cigarettes_per_day" not in core:
+        core["cigarettes_per_day"] = 0
+    
+    # Parse core data
+    try:
+        core_data = CoreHealthData(**core)
+    except Exception as e:
+        return {
+            "error": "Invalid core data",
+            "details": str(e),
+            "received_fields": list(core.keys()),
+            "required_fields": ["age", "gender", "hypertension", "heart_disease", "ever_married", 
+                              "work_type", "Residence_type", "height_cm", "weight_kg", "smoking_status"]
+        }
+    
+    # Parse modifiers
+    modifiers_data = None
+    if "modifiers" in request and request["modifiers"]:
+        try:
+            modifiers_data = RiskModifiers(**request["modifiers"])
+        except Exception as e:
+            # If modifiers fail, continue without them
+            pass
+    
+    # Parse labs
+    labs_data = None
+    if "labs" in request and request["labs"]:
+        try:
+            labs_data = LabValues(**request["labs"])
+        except:
+            pass
+    
     # Layer 1: ML Risk Score
-    ml_score, category, top_drivers, bmi, glucose = get_ml_risk_score(request.core)
+    ml_score, category, top_drivers, bmi, glucose = get_ml_risk_score(core_data)
     
     # Layer 2: Risk Modifiers
-    modifiers_list, modifier_points = calculate_risk_modifiers(request.modifiers)
+    modifiers_list, modifier_points = calculate_risk_modifiers(modifiers_data)
     adjusted_score = min(ml_score + modifier_points, 99)
     
     # Recalculate category if adjusted
@@ -1137,16 +1150,16 @@ def full_assessment(request: FullAssessmentRequest):
     else: adj_category = "Critical"
     
     # Layer 3: Lab Suggestions
-    labs = get_lab_suggestions(ml_score, adjusted_score, adj_category, top_drivers, request.core, request.modifiers)
+    labs = get_lab_suggestions(ml_score, adjusted_score, adj_category, top_drivers, core_data, modifiers_data)
     
     # Layer 4: Lab Interpretation (if provided)
-    lab_interpretations, abnormal_flags, doctor_triggers = interpret_labs(request.labs, request.core.age)
+    lab_interpretations, abnormal_flags, doctor_triggers = interpret_labs(labs_data, core_data.age)
     
     # Layer 5: Prevention Plan
-    plan = get_prevention_plan(ml_score, adjusted_score, adj_category, top_drivers, request.core, request.modifiers, lab_interpretations)
+    plan = get_prevention_plan(ml_score, adjusted_score, adj_category, top_drivers, core_data, modifiers_data, lab_interpretations)
     
     # Layer 6: Doctor Report
-    report = generate_doctor_report(ml_score, adjusted_score, adj_category, top_drivers, request.core, request.modifiers, lab_interpretations, doctor_triggers)
+    report = generate_doctor_report(ml_score, adjusted_score, adj_category, top_drivers, core_data, modifiers_data, lab_interpretations, doctor_triggers)
     
     return {
         "ml_risk_score": ml_score,
@@ -1154,7 +1167,7 @@ def full_assessment(request: FullAssessmentRequest):
         "risk_category": adj_category,
         "top_drivers": top_drivers,
         "bmi": round(bmi, 1),
-        "estimated_glucose": round(glucose, 1) if not request.core.glucose_known else None,
+        "estimated_glucose": round(glucose, 1) if not core_data.glucose_known else None,
         "risk_modifiers": modifiers_list,
         "modifier_points": modifier_points,
         "lab_suggestions": labs,
@@ -1167,8 +1180,19 @@ def full_assessment(request: FullAssessmentRequest):
     }
 
 @app.post("/predict")
-def predict_only(core_data: CoreHealthData):
+def predict_only(request: dict):
     """Quick prediction with core data only."""
+    core = request.get("core", request)  # Handle both wrapped and unwrapped
+    
+    # Normalize
+    if "residence_type" in core and "Residence_type" not in core:
+        core["Residence_type"] = core.pop("residence_type")
+    
+    try:
+        core_data = CoreHealthData(**core)
+    except Exception as e:
+        return {"error": str(e), "received": core}
+    
     ml_score, category, top_drivers, bmi, glucose = get_ml_risk_score(core_data)
     return {
         "ml_risk_score": ml_score,
@@ -1179,10 +1203,27 @@ def predict_only(core_data: CoreHealthData):
     }
 
 @app.post("/analyze-labs")
-def analyze_labs_only(core_data: CoreHealthData, labs: LabValues):
+def analyze_labs_only(request: dict):
     """Analyze uploaded lab results."""
+    core = request.get("core", {})
+    labs = request.get("labs", {})
+    
+    # Normalize core
+    if "residence_type" in core and "Residence_type" not in core:
+        core["Residence_type"] = core.pop("residence_type")
+    
+    try:
+        core_data = CoreHealthData(**core)
+    except Exception as e:
+        return {"error": str(e)}
+    
+    try:
+        labs_data = LabValues(**labs)
+    except Exception as e:
+        return {"error": f"Invalid lab data: {str(e)}"}
+    
     ml_score, category, top_drivers, bmi, glucose = get_ml_risk_score(core_data)
-    interpretations, abnormal_flags, doctor_triggers = interpret_labs(labs, core_data.age)
+    interpretations, abnormal_flags, doctor_triggers = interpret_labs(labs_data, core_data.age)
     
     return {
         "ml_risk_score": ml_score,
